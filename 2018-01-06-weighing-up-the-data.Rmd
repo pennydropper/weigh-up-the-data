@@ -1,0 +1,478 @@
+---
+title: Weighing up the data
+author: James
+date: '2018-02-03'
+categories:
+  - personal
+  - R
+tags:
+  - loess
+  - regression
+slug: weighing-up-the-data
+---
+
+# Introduction
+
+Health and wellbeing is one of my 5 core values, and I extended our new beginning in 2017 to establish new habits to live these values.  The new habits included:
+
+* Cycling to work where possible;
+* Cutting out "gratuitous" sugar, i.e. confectionary and cakes;
+* Reducing the evening meal to virtually a snack, thus making it my smallest meal of the day.
+* Following the [7 minute workout](http://www.smh.com.au/lifestyle/diet-and-fitness/the-sevenminute-workout-does-it-really-work-20130904-2t66i.html) 3 days per week, though I've embellished the exercises and extended it to a 30 minute workout thrice weekly.
+
+Weight loss was not my primary objective but I was curious to see the impact of these new habits.  My philosophy is well summarised by this article about [focussing on healthy habits](http://www.abc.net.au/news/health/2018-01-21/set-aside-losing-weight-focus-on-healthy-behaviours/9345648).
+
+This blog post uses data to tell the story of the effect on my weight of adopting these habits.  As you will see, I lost a considerable amount of weight, which was satisfying, but the study also shows the surprising variablility in my daily weight-in.
+
+To be honest, I'm a little averse to sharing this story in case it comes across as vain or insensitive to friends and others who struggle with their weight.  I see myself as very fortunate to have found a framework that has allowed me to achieve this weight loss - adopting these habits was relatively easy for me.  I'm really sharing this story as a very personal account of some simple data collection and analysis - as though I am a "human guinea pig".
+
+# Measurement Methods
+Measuing my weight was very simple:
+
+* I weigh myself first thing each morning immediately after I get out of bed (well, actually the second thing...) and before I even drink water.  For consistency, I weigh myself wearing my pyjamas, though I realised in winter that the additional t-shirt added 400g to my weight.
+* We use a Weight Watchers branded bathroom scales with a digital display.  As the recorded weight can vary from measure to measure, I tare the scales; weigh myself and repeat until I record the same weight twice in succession.  On the majority of mornings, about 19 out of 20, I only need to tare twice.
+* I simply record the weight with pencil on a sheet taped to the inside of the bathroom cabinet.
+* The scales show 50g increments though I only recorded the 100g increment.
+
+I adopted this routine from 26 March 2017, though I started the daily weigh-in from 13 Feburary and made a feeble attempt to record the readings in the Numbers app on my phone.  This recording method was way too cumbersome and inconvenient - which shows that there is still room for old technology.  For the record, my weight reading on 13 February was 94.7kg.
+
+Some days have no reading, particularly when I've been away from home.  This represents reality and, as a data scientist, I have left the days blank in some cases or imputed the reading by copying the previous day's reading.
+
+# The Raw Data
+
+```{r setup, include=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(forcats)
+library(lubridate)
+library(modelr)            # to perform modelling
+library(ggridges)          # Ridgeline plots
+library(forecast)
+library(timetk)            # For autocorrelation test
+library(lmtest)
+
+data = './data'
+
+```
+
+```{r import.wt, include=FALSE}
+wts.raw <- read_csv(paste0(data, "/", "James weight.csv"),
+                    col_types = cols(
+                      WcComm = col_date(format = "%d-%b-%y"),
+                      Sun = col_double(),
+                      Mon = col_double(),
+                      Tue = col_double(),
+                      Wed = col_double(),
+                      Thu = col_double(),
+                      Fri = col_double(),
+                      Sat = col_double(),
+                      Comment = col_character(),
+                      WkMin = col_double(),
+                      WkMax = col_double()
+                    ))
+
+# wts.raw %>% glimpse()
+
+# wts.raw %>% summary()
+```
+
+```{r tidy.wt, include=FALSE}
+wkdays <- c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+
+wts.clean <- wts.raw %>%
+  gather(Sun:Sat, key = 'wk.day', value = wt, convert = TRUE,
+         na.rm = TRUE) %>%
+  mutate(wk.day = factor(wk.day, levels = wkdays),
+         wk.day.val = as.numeric(wk.day),
+         date = WcComm + wk.day.val - 1) %>%
+  select(date, wt, Comment, wk.day)
+```
+
+```{r chart.raw.data, echo=FALSE, fig.align='center'}
+wts.clean %>%
+  ggplot(aes(x = date, y = wt)) +
+  geom_point(aes(colour = wk.day)) +
+  geom_smooth(span = 0.2, method = "loess") +
+  labs(title = "Daily weight with line of best fit",
+       subtitle = "Varying rates of decline to Christmas then a gain of 1.5kg",
+       x = "Date in 2017",
+       y = "Weight (kg)") +
+  scale_x_date(date_breaks = "1 month",
+               date_labels = "%b-%y") +
+  scale_y_continuous(breaks = c(84:96)) +
+  coord_cartesian(ylim = c(84, 96))
+
+```
+
+This chart shows that weight loss was consistent and steady from April through to the start of August.
+
+From August to December, weight loss has tapered off but there still appears to be a gradual decline in weight.
+
+There is a definite dip in weight at the start of September, which coincides with a week when I battled a cold.  My weight then picks up in the latter half of September, which coincides with 50th birthday celebrations. My weight does not really fall below the smoothed line again until mid-October.  The slight increase in November may coincide with a temporary habit of consuming raw almonds by the handful at work; a habit I cut by the start of December.
+
+My weight has clearly picked up from Christmas; like most people, I overate across the Christmas / New Year period and broke my normal exercise routines.
+
+What also stands out is the variability of the recorded weights above and below the smoothed line (line of best fit).  I suspect that this is due to a range of reasons:
+
+* Physiological effects, such as level of hydration and food in my digestive system.
+* Day of the week effect as I tended to eat more on weekend days than week days.
+* Variability in the scales.
+
+As a data scientist, I'm particularly interested in the residuals, i.e. the variation between the line of best fit and the actual reading.
+
+For data scientists, I used the [Loess](https://en.wikipedia.org/wiki/Local_regression) approach to generating the line of best fit with span = 0.2.  I experimented with a range of spans until I found a line that I judged as a good fit for the points.  I considered using an exponential smoothing method but chose Loess on the assumption that the residuals were far greater than the true day-to-day movement, thus the short-term future readings were as valid to include in the smoothing function as the short-term recent readings.
+
+The "line of best fit" should represent my normalised weight once the random affects are removed. It should represent my "true" weight.  From a statistics point of view, I had the following train of thought:
+
+1. There should be a better way to determine the optimum span.
+2. I played around with optimising the span using k-folds analysis, but the optimum result was the minimum span which produced a very volatile "smoothed" line.  i.e. the smoothed line looked like it was overfitting the data.
+3. I also played around smoothing splines, though it produced a smoothed line that was even more overfitting.
+4. Then I considered the pattern in the residuals, which led to a new theory; there is moderate auto-correlation in the residuals.  This auto-correlation hinders methods to find an optimised smoothing lines that don't "overfit" the data.
+
+# Analysis of the variations from the smoothed line
+
+```{r add.loess, include=FALSE}
+wt.lo <- wts.clean %>%
+  mutate(date.nm = as.numeric(date)) %>%
+  loess(wt ~ date.nm, data = ., span = 0.2)
+
+wts.pred <- wts.clean %>%
+  mutate(date.nm = as.numeric(date)) %>%
+  add_predictions(wt.lo) %>%
+  add_residuals(wt.lo)
+
+# wts.pred %>% glimpse()
+```
+
+By adding the predictions and residuals to the data set, we can understand some of the variations better.
+
+```{r daily.residuals, echo=FALSE, fig.align='center'}
+wts.pred %>%
+  ggplot(aes(x = date, y = resid)) +
+  geom_point(aes(colour = wk.day)) +
+  scale_x_date(date_breaks = "1 month",
+               date_labels = "%b-%y") +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_line(colour = "grey") +
+  labs(title = "Daily residuals",
+       subtitle = "Difference between the recorded weight and smoothed line",
+       x = "",
+       y = "Difference from local smoothed line (kg)")
+  
+```
+
+The spread of the points above and below the zero-line looks reasonable.  
+
+Statistically speaking, there is a chance that the frequency of the points above and below the line is not random.  Later, I'll discuss some interesting patterns in the sequence of residuals.
+
+
+**Variations from month-to-month using a "box plot"**
+
+This box plot shows the spread of the residuals within each month.  Box plots are regularly used by data scientists to represent the spread of data points.  The points and line below the box represent the bottom 25% of the residuals  The bottom half of the box represents the next 25% of the residuals (the second quartile), and so on.  The points above and below the box represent outliers.  I've added a point in the middle of the box to represent the average of the residuals, which is usually close to the median but rarely exactly the same.
+
+My key conclusion from this chart is that the residuals are evenly spread around zero, or close to zero, for every month, which supports this analysis.
+
+```{r residuals.by.month, echo=FALSE}
+months.lst <- wts.pred %>%
+  mutate(date.month = floor_date(date, "month"),
+         month.lbl = as.character.Date(date, "%b-%y")) %>%
+  select(date.month, month.lbl) %>%
+  distinct() %>%
+  arrange(date.month) %>%
+  pull(month.lbl)
+         
+wts.pred %>%
+  mutate(period = factor(as.character.Date(date, "%b-%y"), labels = months.lst)) %>%
+  group_by(period) %>%
+  mutate(resid.mean = mean(resid, na.rm = TRUE)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = period, y = resid)) +
+  geom_point(aes(x = period, y = resid.mean)) +
+  coord_cartesian(ylim = c(-2, 2)) +
+  labs(title = "Spread of the residuals base on the calendar month",
+       subtitle = "Box-plot shows each quartile and the median. Mean of the residuals are also displayed.",
+       x = "",
+       y = "Difference from local smoothed line") +
+  geom_hline(yintercept = 0, colour = "red")
+
+```
+
+**Variations between days of the week**
+
+What if we look at the distribution of residuals based on the day of the week.  We will split the dates into the period before 1 August, between 1 August and Christmas, and after Christmas, which is around where I observe "inflection" points.
+
+```{r residuals.by.dow, echo=FALSE}
+wts.pred %>%
+  mutate(period = factor(case_when(
+    date < dmy("1/8/2017") ~ "Pre-Aug",
+    date < dmy("25/12/2017") ~ "Aug-Dec",
+    TRUE ~ "Post Xmas"), levels = c("Pre-Aug", "Aug-Dec", "Post Xmas"))
+  ) %>%
+  group_by(period, wk.day) %>%
+  mutate(resid.mean = mean(resid, na.rm = TRUE)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = wk.day, y = resid, color = wk.day)) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point(aes(x = wk.day, y = resid.mean, color = wk.day)) +
+  facet_grid(. ~ period) +
+  coord_cartesian(ylim = c(-2, 2)) +
+  labs(title = "Spread of the residuals base on the day of the week",
+       subtitle = "Box-plot shows each quartile and the median. Mean residual also displayed.",
+       x = "",
+       y = "Difference from local smoothed line")
+```
+
+The box plots show some interesting features.
+
+For the Pre-August period:
+
+* The median residual for sunday is around +0.25kg, whereas the median residual for Saturday is around -0.25kg.
+* This is consistent with different eating patterns and activity levels on weekends compared to weekedays.
+
+For the Aug-Xmas period:
+
+* The highest residual is Monday, with a median of around +0.3kg.
+* The lowest residual is Thursday with a median of around -0.2kg.
+* Friday's and Saturday's median residual is close to zero.
+
+### Adjust for Day of the Week
+
+What if we adjust for the day of the week effect?  Statistically speaking, this is transforming the data to remove the effect of the day of the week (assuming my hypothesis that the day of the week does affect my weigh-in).
+
+**Day of the week adjustments**
+```{r dow.adj, echo=FALSE}
+wts.pred <- wts.pred %>%
+  mutate(period = factor(case_when(
+    date < dmy("1/8/2017") ~ "Pre-Aug",
+    date < dmy("25/12/2017") ~ "Aug-Dec",
+    TRUE ~ "Post Xmas"), levels = c("Pre-Aug", "Aug-Dec", "Post Xmas"))
+  )
+
+wts.adj <- wts.pred %>%
+  group_by(period, wk.day) %>%
+  summarise(wk.day.eff = median(resid))
+
+with_plus <- function(x, ...) {
+  paste0(if_else(x > 0, "+", ""), str_trim(format(x, ...)))
+}
+
+wts.adj %>%
+  spread(key = period, value = wk.day.eff) %>%
+  mutate_if(is.numeric, with_plus, digits = 1) %>%
+  rename(Day = wk.day) %>%
+  knitr::kable(#caption = "Day of the week adjustments",
+               format = "html",
+               align = c("l", rep("r", 3)))
+```
+
+
+
+This table represents the assumed "day-of-the-week" effect to subtract from my raw readings.
+
+With these adjustments, how does my weight projectory now look?
+
+```{r plot.wt.adj, echo=FALSE, fig.align='center'}
+wts.pred <- wts.pred %>%
+  left_join(wts.adj, by = c("period", "wk.day")) %>%
+  mutate(wt.adj = wt - wk.day.eff)
+
+wts.pred %>%
+  ggplot(aes(x = date, y = wt.adj)) +
+  geom_point(aes(colour = wk.day)) +
+  geom_smooth(span = 0.2, method = "loess") +
+  labs(title = "Daily adjusted weight with line of best fit",
+       x = "",
+       y = "Adjusted Weight (kg)") +
+  scale_x_date(date_breaks = "1 month",
+               date_labels = "%b-%y") +
+  scale_y_continuous(breaks = c(84:96), sec.axis = dup_axis()) +
+  coord_cartesian(ylim = c(84, 96))
+
+```
+
+Not surprisingly, the line of best fit looks similar with a similar spread of points above and below the line.
+
+```{r smooth.adj, echo=FALSE}
+wt.lo <- wts.pred %>%
+  loess(wt.adj ~ date.nm, data = ., span = 0.2)
+
+wts.adj.pred <- wts.pred %>%
+  rename(pred.raw = pred,
+         resid.raw = resid) %>%
+  add_predictions(wt.lo) %>%
+  mutate(pred = pred + wk.day.eff,            # Reverse the day of week transformation
+         resid = pred - wt)
+
+# wts.adj.pred %>% glimpse()
+```
+
+Now, let's see how the residuals look.  They certainly appear as though they are closer to zero.
+
+```{r daily.resid.adj, echo=FALSE, fig.align='center'}
+wts.adj.pred %>%
+  ggplot(aes(x = date, y = resid)) +
+  geom_point(aes(colour = wk.day)) +
+  scale_x_date(date_breaks = "1 month",
+               date_labels = "%b-%y") +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_line(colour = "grey") +
+  geom_point(aes(y = resid.raw), colour = "grey", alpha = 0.5, shape = 18,
+             show.legend = TRUE) +
+  labs(title = "Daily residuals based on the day-of-week adjusted weight",
+       subtitle = "Difference between the adjusted weight and the new smoothed line. Previous residuals in grey.",
+       x = "",
+       y = "Difference from local smoothed line (kg)")
+  
+```
+
+```{r wt.adj.resid.dow, echo=FALSE}
+wts.adj.pred %>%
+  group_by(period, wk.day) %>%
+  mutate(resid.mean = mean(resid, na.rm = TRUE)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = wk.day, y = resid, color = wk.day)) +
+  geom_point(aes(x = wk.day, y = resid.mean, color = wk.day)) +
+  facet_grid(. ~ period) +
+  coord_cartesian(ylim = c(-2, 2)) +
+  labs(title = "Spread of the residuals base on the day of the week",
+       subtitle = "Box-plot shows each quartile and the mean",
+       x = "",
+       y = "Difference from local smoothed line")
+```
+
+
+## What is the average spread
+One final piece of analysis: how much does the day-to-day weigh-in vary from the "true" weight, both before and after the day-of-the-week adjustment?
+
+**Without day-of-week adjustment**  
+**Residual scores**
+```{r summ.stats.raw, echo=FALSE}
+wts.adj.pred %>%
+  group_by(period) %>%
+  summarise(`Average day-to-day variation` = mad(resid.raw),
+            `Standard Deviation` = sd(resid.raw, na.rm = TRUE),
+            `Correlation between predicted and actual` = cor(pred.raw, wt)) %>%
+  knitr::kable(#caption = "Residual scores without the day-of-the-week adjustment",
+               format = "html",
+               digits = 2)
+
+```
+
+
+**With day-of-week adjustment**  
+**Residual scores**
+```{r summ.stats.adj, echo=FALSE}
+wts.adj.pred %>%
+  group_by(period) %>%
+  summarise(`Average day-to-day variation` = mad(resid),
+            `Standard Deviation` = sd(resid, na.rm = TRUE),
+            `Correlation between predicted and actual` = cor(pred, wt)) %>%
+  knitr::kable(#caption = "Residual scores with the day-of-the-week adjustment",
+               format = "html",
+               digits = 2)
+
+```
+
+
+We can see that there is a marginal improvement in the residuals as a result of this transformation.
+
+# Summary
+This analysis set out to visualise my daily recorded weights, particularly as I finally succeeded in adopting habits that represent my "Health and Wellbeing" habits.
+
+What surprised me was the day-to-day variation in my recorded weights.  The explanations for the variation include:
+
+1. Levels of hydration.  This is particularly evident in the week/commencing 4 September, when I battled a cold, lost fluids and cosequently lost about 700g from 2 weeks earlier.
+2. Other physiological reasons, such as the food in my digestive system.
+3. Day-of-the-week variations, driven by different habits on different days of the week, such as how much I exercise and how much I eat and drink I consume.  This contrasts particuarly on working days and weekends.
+3. Random, day-to-day effects, which I attribute to variations in the scales.
+
+There are many opinions that people should only weigh themselves weekly or fortnightly as the day-to-day variation can by distracting and demoralising.  My opinion is that people should find what works for them.  What works for me is a daily weigh-in with an understanding that there is a random aspect to the reading that I should factor in.  If I weighed myself only weekly, I may strike a day with a positive random reading, which could dishearten after a week of effort and discipline.
+
+A quick review of "weight loss tracker" apps in Apple's App Store found that only 2 of the top apps show weights graphically, and neither of these graphs depicted anywhere near the day-to-day variation I experienced.  One actually had a very smooth decline.  App developers could add a feature that estimates the user's true weight after adjusting for day-to-day variations.
+
+# For the technically minded
+
+## Optimising the Smoothing Span
+
+This analysis assumed that the ideal Loess span setting for smoothing was 0.2, which was through pure judgement.
+
+I grappled with how to find an optimised setting for span.
+
+My first attempt was to use k-folds analysis to test a range of span settings.  Interestingly, the "optimum" value was 0.06, which was also the minimum span that the algorithm would accept.  I optimised the span setting based on minimising the RMS.
+
+```{r optim.span.raw, warning=FALSE}
+# Adapted from https://stats.stackexchange.com/questions/2002/how-do-i-decide-what-span-to-use-in-loess-regression-in-r
+# on 29 Jan 2018
+
+wts.model <- wts.pred %>%
+  filter(date < ymd("2017/12/25"))
+
+span.seq <- seq(from = 0.06, to = 0.95, by = 0.05) #explores range of spans
+k <- 10 #number of folds
+set.seed(1) # replicate results
+folds <- sample(x = 1:k, size = nrow(wts.model), replace = TRUE)
+cv.error.mtrx <- matrix(rep(x = NA, times = k * length(span.seq)), 
+                        nrow = length(span.seq), ncol = k)
+
+for(i in 1:length(span.seq)) {
+  for(j in 1:k) {
+    loess.fit <- loess(wt ~ date.nm, data = wts.model[folds != j, ], span = span.seq[i])
+    preds <- predict(object = loess.fit, newdata = wts.model[folds == j, ])
+    cv.error.mtrx[i, j] <- mean((wts.model$wt[folds == j] - preds)^2, na.rm = TRUE)
+  }
+}
+
+cv.errors <- rowMeans(cv.error.mtrx)
+# cv.errors
+
+best.span.i <- which.min(cv.errors)
+best.span <- span.seq[best.span.i]
+
+wts.model %>%
+  ggplot(aes(x = date, y = wt)) +
+  geom_point(size = 0.5) + # aes(colour = wk.day)) +
+  geom_smooth(span = 0.2, method = "loess", aes(colour = "blue")) +
+  geom_smooth(span = best.span, method = "loess", aes(colour = "red"), se = FALSE) +
+  labs(title = "Daily weight with alternate lines of best fit",
+       subtitle = "Red line is \"optimised\" but appears to overfit",
+       x = "",
+       y = "Weight (kg)") +
+  scale_x_date(date_breaks = "1 month",
+               date_labels = "%b-%y") +
+  scale_y_continuous(breaks = c(84:96)) +
+  coord_cartesian(ylim = c(84, 96)) +
+  scale_colour_manual("Smoothing span",
+                      values = c(blue = "blue", red = "red"),
+                      labels = c("0.2", as.character(best.span)))
+```
+
+The "optimised" span setting appears to overfit the points.  The day of the week effect seems particularly evident in the pre-August period, which counters the point of finding a line of best fit.
+
+## Autoregression in the Residuals
+
+The autogregression of the residuals gives a clue as to why the k-folds method failed to find a satisfactory optimised span.  The correlation factor for lag 1 is around 0.34, indicating a mild correlation between successive readings.  Hence, the optimisation algorithm will fail to correct when a single reading is missing.
+
+Interestingly, the correlation with lag 7 is completetely insignificant, which challenges the validity of my day-of-the-week adjustment.  I confess that I cannot explain this or suggest a better alternative.
+
+```{r resid.acf}
+par( mar=c(3.1, 4.7, 2.3, 0),
+     cex.lab = 0.8,
+     cex.axis = 0.8) 
+
+wts.pred %>%
+  filter(date < ymd("2017/8/1"), date <= ymd("2017/12/24")) %>%
+  arrange(date) %>%
+  select(resid) %>%
+  as.ts() %>%
+  Acf(main = "",
+      xlab = "",
+      ylab = "", 
+      cex.lab = 0.8,
+      cex.axis = 0.8)
+mtext(side=1, text="Lag between pairs of days", line=1.8)
+mtext(side=2, text="Correlation factor of weights between pairs of days", line=1.8)
+mtext(side=3, text="Autocorrelation of the residuals prior to day-of-week adjustment", line=0.5)
+
+
+```
+
